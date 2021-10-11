@@ -3,7 +3,8 @@ import * as distance from "https://deno.land/x/damerau_levenshtein/mod.ts";
 
 let SYSCALLS = {
 	"WRITE_SYSCALL": 0x4,
-	"EXIT_SYSCALL": 0x1
+	"EXIT_SYSCALL": 0x1,
+	"READ_SYSCALL": 0x3
 }
 
 let ASSEMBLY_BOILERPLATE = `global _start
@@ -25,10 +26,19 @@ let EXIT_FUNCTION = `EXIT:
 	ret
 `;
 
+let ASK_FUNCTION = `ASK:
+	mov eax, ${SYSCALLS.READ_SYSCALL}
+    	mov ebx, 0
+   	mov edx, 100
+    	int 0x80
+    	ret
+`;
+
 let data = [];
 let text = [];
 let variableNames = [];
 let variables = [];
+let outOfScopeVariableNames = [];
 
 let inputFileName = Deno.args[0];
 let outputAssemblyFileName = inputFileName.split(".")[0] + ".asm";
@@ -42,6 +52,7 @@ let lines = fileContents.split("\n");
 function prepareText() {
 	text.push(PRINT_FUNCTION);
 	text.push(EXIT_FUNCTION);
+	text.push(ASK_FUNCTION);
 	text.push("_start:");
 }
 
@@ -103,24 +114,48 @@ for(let i = 0; i < lines.length; i++) {
 
 	switch(operation) {
 		case "say":
-			let position = data.length / 2;
+			if(variableNames.includes(proceedingSections)) {
+				let position = data.length / 2;
+	
+				text.push(`	mov ecx, variable_${position}`);
+				text.push(`	mov edx, variable_${position}_len`);
+				text.push(`	call PRINT`);
+	
+				let returnValue = "";
+			
+				try {
+					returnValue = eval(GenerateVariableString() + proceedingSections);
+				} catch(e) {
+					HandleUndefined(i, proceedingSections);
+					Deno.exit();
+				}
 
-			text.push(`	mov ecx, variable_${position}`);
-			text.push(`	mov edx, variable_${position}_len`);
-			text.push(`	call PRINT`);
-
-			let returnValue = "";
-
-			try {
-				returnValue = eval(GenerateVariableString() + proceedingSections);
-			} catch(e) {
+				data.push(`	variable_${position}: db "${returnValue}", 0xA`);
+				data.push(`	variable_${position}_len equ $-variable_${position}`);
+			} else if(outOfScopeVariableNames.includes(proceedingSections)) {
+				text.push(`	mov ecx, ${proceedingSections}`);
+				text.push(`	mov edx, 100`);
+				text.push(`	call PRINT`);
+			} else {
 				HandleUndefined(i, proceedingSections);
-				Deno.exit();
 			}
 			
-			data.push(`	variable_${position}: db "${returnValue}", 0xA`);
-			data.push(`	variable_${position}_len equ $-variable_${position}`);
+			break;
 
+		case "ask":
+			let question = proceedingSections.split('"')[1];
+
+			let destinationVariable = proceedingSections.slice(question.length + 15);
+
+			console.log(`Destination: ${destinationVariable}`);
+
+			outOfScopeVariableNames.push(destinationVariable);
+
+			data.push(`	${destinationVariable}: times 100 db 0`);
+
+			text.push(`	mov ecx, ${destinationVariable}`);
+			text.push(`	call ASK`);
+		
 			break;
 			
 		case "now":
@@ -172,5 +207,5 @@ let linkerTask = Deno.run({ cmd: ["ld", "-m", "elf_i386", outputObjectFileName, 
 
 await linkerTask.status();
 
-Deno.remove(outputAssemblyFileName);
+//Deno.remove(outputAssemblyFileName);
 Deno.remove(outputObjectFileName);
